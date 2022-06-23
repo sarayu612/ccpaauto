@@ -1,0 +1,143 @@
+version: 2.1
+orbs:
+  slack: circleci/slack@4.1.1
+
+parameters:
+  version:
+    type: string
+    default: "master-wrapperScript"
+  environment:
+    type: string
+    default: "preProd"
+  initiator:
+    type: string
+    default: ""
+
+workflows:
+  smoke_test_flow:
+    jobs:
+      - build
+      - run_smoke_tests:
+          requires:
+            - build
+      - report_result:
+          context: slack
+          requires:
+            - run_smoke_tests
+
+jobs:
+  build:
+    docker:
+      - image: markhobson/maven-chrome:jdk-8
+    resource_class: small
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "pom.xml" }} # appends cache key with a hash of pom.xml file
+            - v1-dependencies- # fallback in case previous cache key is not found
+      - run: mvn -Dmaven.test.skip=true package
+      - save_cache:
+            paths:
+              - ~/.m2
+            key: v1-dependencies-{{ checksum "pom.xml" }}
+
+  run_smoke_tests:
+    parallelism: 15 # parallel containers to split the tests among
+    docker:
+      - image: markhobson/maven-chrome:jdk-8
+    resource_class: small
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "pom.xml" }} # appends cache key with a hash of pom.xml file
+            - v1-dependencies- # fallback in case previous cache key is not found
+      - run:
+          name: Running Smoke Tests in << pipeline.parameters.environment >> Environment
+          command: |
+            export environment=<< pipeline.parameters.environment >>
+            export version=<< pipeline.parameters.version >>
+            set +e
+            mvn -Dtest=$(for file in $(circleci tests glob "src/test/**/**.java" \
+                | circleci tests split --split-by=timings); \
+                do basename $file \
+                | sed -e "s/.java/,/"; \
+                done | tr -d '\r\n') \
+                -e test -DsuiteXmlFile=ccpa_testngSuite.xml
+            mkdir -p ~/test-results/junit/
+            mkdir -p ~/test-reports/
+            find . -type f -regex ".*/target/surefire-reports/.*xml" -exec cp {} ~/test-results/junit/ \;
+            find . -type f -regex ".*/target/surefire-reports/.*txt" -exec cp {} ~/test-reports/ \;
+            find . -type f -regex ".*/reports/.*html" -exec cp {} ~/test-results/junit/ \;
+            find . -type f -regex ".*/screenshots/.*png" -exec cp {} ~/test-results/junit/ \;
+      - save_cache:
+            paths:
+              - ~/.m2
+            key: v1-dependencies-{{ checksum "pom.xml" }}
+      - persist_to_workspace:
+          root: ~/
+          paths:
+            - test-reports
+      - store_test_results:  # https://circleci.com/docs/2.0/collect-test-data
+          path: ~/test-results
+          # if maven build fails, then it will not output the target directory with test results  In this
+      - store_artifacts:
+          path: ~/test-results/junit
+
+  report_result:
+    docker:
+      - image: cimg/base:stable
+    resource_class: small
+    steps:
+      - attach_workspace:
+          # Must be absolute path or relative path from working_directory
+          at: ~/
+      - run:
+          name: Report Smoke Test Results in << pipeline.parameters.environment >> Environment
+          # To use environment variables in the Slack orb, we must export them using >> $BASH_ENV https://circleci.com/docs/2.0/env-vars/#setting-an-environment-variable-in-a-shell-command
+          # Here we take te results of the tests from TestSuite.txt and cut it on ,, to know TESTSRUN, FAILURES, ERRORS
+          command: |
+            REPORT=""
+            for report in $(find ~/test-reports -type f);\
+            do\
+              CLIENT=$(sed '2q;d' $report | cut -d'.' -f 4)\
+              RESULT=$(sed '4q;d' $report | cut -d',' -f 1,2,3)\
+              REPORT="$REPORT\n$CLIENT\n$RESULT\n"\
+            ;done
+            echo "export RUNREPORT=\"$REPORT\"" >> $BASH_ENV
+      - slack/notify: # https://github.com/CircleCI-Public/slack-orb/wiki/Dynamic-Templates
+          custom: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "Smoke Tests",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "<< pipeline.parameters.initiator >> inititated smoke tests in the << pipeline.parameters.environment >> environment\n\n $RUNREPORT"
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Tests"
+                      },
+                      "url": "$CIRCLE_BUILD_URL"
+                    }
+                  ]
+                }
+              ]
+            }
+          event: always

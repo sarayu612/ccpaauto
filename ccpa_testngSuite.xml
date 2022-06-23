@@ -1,0 +1,16 @@
+<!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd" >
+
+<suite name="CCPA Smoke Suite Execution">
+
+	<listeners>
+		<listener class-name="org.framework.helpers.TestListener" />
+		<!-- <listener class-name="org.framework.helpers.RetryListener" /> -->
+	</listeners>
+
+	<test name="Web-Automation">
+		<packages>		
+		<package name="org.framework.tests.CCPA"/>
+		</packages>
+	</test>
+
+</suite>
